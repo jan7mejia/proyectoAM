@@ -1,0 +1,1 @@
+export const BASE_URL = 'https://wifi-caravan-chirpy.ngrok-free.dev';

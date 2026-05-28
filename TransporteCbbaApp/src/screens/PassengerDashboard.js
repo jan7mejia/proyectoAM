@@ -1,69 +1,400 @@
-import React from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity } from 'react-native';
-import { MaterialIcons } from '@expo/vector-icons';
+
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { StyleSheet, View, ScrollView, Alert, Vibration } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { Audio } from 'expo-av'; 
+import { BASE_URL } from '../../config';
+
+// Importación de subcomponentes modulares
+import DashboardHeader from './passengerComponents/DashboardHeader';
+import QuickActions from './passengerComponents/QuickActions';
+import BalanceWidget from './passengerComponents/BalanceWidget';
+import PromoBanner from './passengerComponents/PromoBanner';
+import CollapsibleLines from './passengerComponents/CollapsibleLines';
+import NotificationModal from './passengerComponents/NotificationModal';
+import SupportModal from './passengerComponents/SupportModal';
+import RoutesModal from './passengerComponents/RoutesModal';
+
+const API_URL = `${BASE_URL}/api`;
 
 export default function PassengerDashboard({ route, navigation }) {
-  // Recorremos los datos reales del usuario enviados desde el Login
-  const { user } = route.params || { user: { nombre: 'Usuario Pasajero', saldo: 0.00, correo: 'pasajero@paybus.com' } };
+  const [showBalance, setShowBalance] = useState(true);
+  const [isSectionOpen, setIsSectionOpen] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [loadingNotif, setLoadingNotif] = useState(false);
+
+  const [notifications, setNotifications] = useState([]);
+  const [isNotifModalOpen, setIsNotifModalOpen] = useState(false);
+  const [isRoutesModalOpen, setIsRoutesModalOpen] = useState(false); 
+
+  const [isSupportModalOpen, setIsSupportModalOpen] = useState(false);
+  const [reportScope, setReportScope] = useState('general'); 
+  const [reportCategory, setReportCategory] = useState('falla_app');
+  const [reportMessage, setReportMessage] = useState('');
+
+  const [dbLines, setDbLines] = useState([]);
+  const [selectedLine, setSelectedLine] = useState(null);
+  const [isLineDropdownOpen, setIsLineDropdownOpen] = useState(false);
+  const [loadingLines, setLoadingLines] = useState(false);
+
+  const prevUnreadCountRef = useRef(0);
+  const soundRef = useRef(null);
+
+  // CORRECCIÓN: Estado inicial consistente con claves numéricas de la BD (id_categoria = 2)
+  const [user, setUser] = useState(route.params?.user || {
+    id_usuario: '1',
+    nombre: 'Jan Alessi',
+    apellido: 'Mejia',
+    correo: 'j.mejia@umss.edu.bo',
+    saldo: 0.00,
+    id_categoria: 2 
+  });
+
+  const userIdActivo = user?.id_usuario || user?.id_usuario_emisor || '1';
+
+  useEffect(() => {
+    async function prepararAudio() {
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,       
+          shouldDuckAndroid: true,          
+          playThroughEarpieceAndroid: false, 
+          stayActiveInBackground: true
+        });
+
+        const { sound } = await Audio.Sound.createAsync(
+          require('../../assets/sounds/alert.mp3'),
+          { shouldPlay: false, volume: 1.0 }
+        );
+        soundRef.current = sound;
+        console.log("Audio de alerta precargado exitosamente en memoria RAM.");
+      } catch (error) {
+        console.log("Error crítico al inicializar o encontrar el archivo .mp3:", error);
+      }
+    }
+    prepararAudio();
+
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.unloadAsync();
+      }
+    };
+  }, []);
+
+  const dispararAlarmaNotificacion = async () => {
+    try {
+      Vibration.vibrate([0, 500, 200, 500]);
+      if (soundRef.current) {
+        await soundRef.current.stopAsync();
+        await soundRef.current.setPositionAsync(0);
+        await soundRef.current.playAsync();
+      }
+    } catch (error) {
+      console.log("Error de ejecución al reproducir la alerta sonora:", error);
+    }
+  };
+
+  useEffect(() => {
+    if (reportScope === 'general') {
+      setReportCategory('falla_app');
+      setSelectedLine(null);
+    } else {
+      setReportCategory('mal_servicio');
+      if (dbLines.length > 0) setSelectedLine(dbLines[0]);
+    }
+  }, [reportScope, dbLines]);
+
+  useEffect(() => {
+    let interval = null;
+    if (userIdActivo) {
+      fetchNotificationsSilently();
+      interval = setInterval(() => {
+        fetchNotificationsSilently();
+      }, 5000); 
+    }
+    return () => { if (interval) clearInterval(interval); };
+  }, [userIdActivo]);
+
+  const fetchNotificationsSilently = async () => {
+    try {
+      const response = await fetch(`${API_URL}/notificaciones/${userIdActivo}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          const nuevasNotificaciones = data.notificaciones || [];
+          const unreadCountActual = nuevasNotificaciones.filter(n => !n.leido).length;
+
+          if (unreadCountActual > prevUnreadCountRef.current) {
+            await dispararAlarmaNotificacion();
+          }
+
+          prevUnreadCountRef.current = unreadCountActual;
+          setNotifications(nuevasNotificaciones);
+        }
+      }
+    } catch (error) {
+      console.log("Error silencioso cargando alertas:", error);
+    }
+  };
+
+  const fetchDatabaseLines = async () => {
+    try {
+      setLoadingLines(true);
+      const response = await fetch(`${API_URL}/lineas/activas`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setDbLines(data.lineas || []);
+          if (data.lineas && data.lineas.length > 0 && reportScope === 'transporte') {
+            setSelectedLine(data.lineas[0]);
+          }
+        }
+      }
+    } catch (error) {
+      console.log("Error cargando líneas:", error);
+    } finally {
+      setLoadingLines(false);
+    }
+  };
+
+  const fetchUpdatedUserData = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(`${API_URL}/usuarios/${userIdActivo}`);
+      if (response.ok) {
+        const data = await response.json();
+        // Si el backend responde con data.usuario, nos acoplamos a la estructura
+        if (data.success && data.usuario) {
+          setUser(data.usuario);
+        } else if (data.success && data.user) {
+          setUser(data.user);
+        }
+      }
+    } catch (error) {
+      console.log("Error cargando datos de usuario:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchNotifications = async () => {
+    try {
+      setLoadingNotif(true);
+      const response = await fetch(`${API_URL}/notificaciones/${userIdActivo}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          const listaNotif = data.notificaciones || [];
+          prevUnreadCountRef.current = listaNotif.filter(n => !n.leido).length;
+          setNotifications(listaNotif);
+        }
+      }
+    } catch (error) {
+      console.log("Error cargando notificaciones:", error);
+    } finally {
+      setLoadingNotif(false);
+    }
+  };
+
+  const marcarNotificacionLeida = async (idNotificacion) => {
+    try {
+      const response = await fetch(`${API_URL}/notificaciones/leer/${idNotificacion}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setNotifications(prev => {
+          const actualizadas = (prev || []).map(n => n.id_notificacion === idNotificacion ? { ...n, leido: true } : n);
+          prevUnreadCountRef.current = actualizadas.filter(n => !n.leido).length;
+          return actualizadas;
+        });
+      }
+    } catch (error) {
+      console.log("Error al actualizar lectura:", error);
+    }
+  };
+
+  const eliminarNotificacion = async (idNotificacion) => {
+    try {
+      const response = await fetch(`${API_URL}/notificaciones/eliminar/${idNotificacion}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setNotifications(prev => {
+          const filtradas = (prev || []).filter(n => n.id_notificacion !== idNotificacion);
+          prevUnreadCountRef.current = filtradas.filter(n => !n.leido).length;
+          return filtradas;
+        });
+      } else {
+        Alert.alert("Error", "No se pudo eliminar la notificación.");
+      }
+    } catch (error) {
+      Alert.alert("Error de Red", "No se pudo conectar con el servidor.");
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      if (userIdActivo) {
+        fetchUpdatedUserData();
+        fetchNotifications();
+        fetchDatabaseLines();
+      }
+    }, [userIdActivo])
+  );
+
+  const unreadCount = (notifications || []).filter(n => !n.leido).length;
+
+  const getCategoryTheme = (idCat) => {
+    // Mapeo dinámico por id_categoria numérico para los estilos estéticos globales del Dashboard
+    switch (Number(idCat)) {
+      case 1:
+        return { label: 'PASAJERO ESTUDIANTE', primaryColor: '#10b981', badgeColor: '#064e3b', icon: 'face' };
+      case 2:
+        return { label: 'PASAJERO UNIVERSITARIO', primaryColor: '#6366f1', badgeColor: '#312e81', icon: 'school' };
+      case 4:
+        return { label: 'ADULTO MAYOR (DIGNIDAD)', primaryColor: '#f97316', badgeColor: '#7c2d12', icon: 'elderly' };
+      case 3:
+      default:
+        return { label: 'PASAJERO - TARIFA NORMAL', primaryColor: '#7123a3', badgeColor: '#4a156d', icon: 'directions-walk' };
+    }
+  };
+
+  // Se determina el color basándose en el id_categoria numérico guardado
+  const theme = getCategoryTheme(user?.id_categoria);
+
+  const handleEnviarReporte = async () => {
+    if (!reportMessage.trim()) {
+      Alert.alert("Campo Requerido", "Por favor, describe el inconveniente.");
+      return;
+    }
+    if (reportScope === 'transporte' && !selectedLine) {
+      Alert.alert("Línea Requerida", "Por favor, selecciona la línea.");
+      return;
+    }
+    try {
+      setLoading(true);
+      const idLineaAsociada = reportScope === 'transporte' ? selectedLine.id_linea : null;
+      const response = await fetch(`${API_URL}/soporte/reportar`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id_usuario_emisor: parseInt(userIdActivo),
+          id_usuario: parseInt(userIdActivo),
+          id_linea_afectada: idLineaAsociada,
+          tipo_usuario_emisor: 'pasajero',
+          categoria: reportCategory,
+          mensaje: reportMessage.trim()
+        })
+      });
+      const resData = await response.json();
+      if (response.ok && resData.success) {
+        Alert.alert("Reporte Recibido", "Tu reporte ha sido enviado con éxito.");
+        setReportMessage('');
+        setReportScope('general');
+        setIsSupportModalOpen(false);
+        fetchNotifications();
+      } else {
+        Alert.alert("Error de Servidor", resData.error || "No se pudo procesar el reporte.");
+      }
+    } catch (error) {
+      Alert.alert("Error de Red", "No se pudo conectar con el servidor.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    Alert.alert("Cerrar Sesión", "¿Estás seguro de que deseas salir?", [
+      { text: "Cancelar", style: "cancel" },
+      { text: "Salir", style: "destructive", onPress: () => navigation.navigate('LoginScreen') }
+    ]);
+  };
 
   return (
-    <ScrollView style={styles.container}>
-      {/* Cabecera Dinámica */}
-      <View style={styles.welcomeCard}>
-        <Text style={styles.welcomeText}>¡Hola, {user.nombre}!</Text>
-        <Text style={styles.userSub}>{user.correo}</Text>
-      </View>
+    <View style={styles.container}>
+      <DashboardHeader
+        user={user}
+        theme={theme}
+        loading={loading}
+        unreadCount={unreadCount}
+        onOpenNotif={() => { fetchNotifications(); setIsNotifModalOpen(true); }}
+        onOpenSupport={() => setIsSupportModalOpen(true)}
+        onLogout={handleLogout}
+      />
 
-      {/* Tarjeta de Saldo Real de la BD */}
-      <View style={styles.balanceCard}>
-        <Text style={styles.balanceLabel}>SALDO DISPONIBLE (PayBus)</Text>
-        <Text style={styles.balanceMonto}>{user.saldo.toFixed(2)} Bs.</Text>
-        <Text style={styles.tarjetaStatus}>• Estado de Cuenta: Activa</Text>
-      </View>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+        <QuickActions 
+          user={user} 
+          navigation={navigation} 
+          onOpenRoutes={() => { fetchDatabaseLines(); setIsRoutesModalOpen(true); }} 
+        />
 
-      {/* Módulos de Interacción */}
-      <Text style={styles.sectionTitle}>Servicios Urbanos</Text>
-      
-      <TouchableOpacity style={styles.actionButton} onPress={() => alert('Cámara activada para escanear QR del Micro')}>
-        <MaterialIcons name="qr-code-scanner" size={24} color="#fff" />
-        <View style={styles.btnTextContainer}>
-          <Text style={styles.btnTitle}>Pagar Pasaje con QR</Text>
-          <Text style={styles.btnDesc}>Escanea el código pegado en el vehículo</Text>
-        </View>
-      </TouchableOpacity>
+        <BalanceWidget
+          user={user}
+          theme={theme}
+          showBalance={showBalance}
+          onToggleBalance={() => setShowBalance(!showBalance)}
+          navigation={navigation}
+        />
 
-      <TouchableOpacity style={styles.actionButton} onPress={() => alert('Generando QR de recarga...')}>
-        <MaterialIcons name="account-balance-wallet" size={24} color="#fff" />
-        <View style={styles.btnTextContainer}>
-          <Text style={styles.btnTitle}>Recargar Saldo</Text>
-          <Text style={styles.btnDesc}>Añade crédito mediante QR Bancario o Efectivo</Text>
-        </View>
-      </TouchableOpacity>
+        {/* CORRECCIÓN CRÍTICA: Se añade el prop user para que herede la sesión */}
+        <PromoBanner theme={theme} user={user} idLineaAsignada={1} />
 
-      {/* Historial Estático de apoyo visual */}
-      <Text style={styles.sectionTitle}>Últimos Movimientos</Text>
-      <View style={styles.historyCard}>
-        <Text style={styles.historyText}>Pago Pasaje - Línea 102 • -1.00 Bs.</Text>
-        <Text style={styles.historyText}>Recarga de Saldo - QR • +20.00 Bs.</Text>
-      </View>
-    </ScrollView>
+        <CollapsibleLines
+          isSectionOpen={isSectionOpen}
+          onToggleSection={() => setIsSectionOpen(!isSectionOpen)}
+          user={user}
+          navigation={navigation}
+        />
+      </ScrollView>
+
+      <RoutesModal
+        visible={isRoutesModalOpen}
+        onClose={() => setIsRoutesModalOpen(false)}
+        dbLines={dbLines}
+        loadingLines={loadingLines}
+        theme={theme}
+      />
+
+      <NotificationModal
+        visible={isNotifModalOpen}
+        onClose={() => setIsNotifModalOpen(false)}
+        loadingNotif={loadingNotif}
+        notifications={notifications}
+        theme={theme}
+        onMarkRead={marcarNotificacionLeida}
+        onDeleteNotif={eliminarNotificacion}
+      />
+
+      <SupportModal
+        visible={isSupportModalOpen}
+        onClose={() => { setReportMessage(''); setReportScope('general'); setIsSupportModalOpen(false); }}
+        theme={theme}
+        reportScope={reportScope}
+        setReportScope={setReportScope}
+        loadingLines={loadingLines}
+        selectedLine={selectedLine}
+        onOpenLinesDropdown={() => setIsLineDropdownOpen(true)}
+        reportCategory={reportCategory}
+        setReportCategory={setReportCategory}
+        reportMessage={reportMessage}
+        setReportMessage={setReportMessage}
+        onSendReport={handleEnviarReporte}
+        isLineDropdownOpen={isLineDropdownOpen}
+        onCloseLinesDropdown={() => setIsLineDropdownOpen(false)}
+        dbLines={dbLines}
+        onSelectLine={(linea) => { setSelectedLine(linea); setIsLineDropdownOpen(false); }}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f172a', padding: 20 },
-  welcomeCard: { marginBottom: 20 },
-  welcomeText: { color: '#fff', fontSize: 24, fontWeight: 'bold' },
-  userSub: { color: '#64748b', fontSize: 14 },
-  balanceCard: { backgroundColor: '#1e3a8a', padding: 24, borderRadius: 20, marginBottom: 25, borderWidth: 1, borderColor: '#2563eb' },
-  balanceLabel: { color: '#93c5fd', fontSize: 11, fontWeight: '700', letterSpacing: 1 },
-  balanceMonto: { color: '#fff', fontSize: 36, fontWeight: '900', marginTop: 5 },
-  tarjetaStatus: { color: '#60a5fa', fontSize: 12, marginTop: 12, fontWeight: '600' },
-  sectionTitle: { color: '#94a3b8', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', marginBottom: 12, letterSpacing: 0.5 },
-  actionButton: { backgroundColor: '#1e293b', padding: 18, borderRadius: 16, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
-  btnTextContainer: { marginLeft: 15, flex: 1 },
-  btnTitle: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
-  btnDesc: { color: '#64748b', fontSize: 12, marginTop: 2 },
-  historyCard: { backgroundColor: '#1e293b', padding: 16, borderRadius: 16, marginBottom: 20 },
-  historyText: { color: '#94a3b8', fontSize: 13, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#334155' }
+  container: { flex: 1, backgroundColor: '#090d16' },
+  scrollContent: { paddingHorizontal: 16, paddingBottom: 30, paddingTop: 14 }
 });

@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, ActivityIndicator, Alert, Dimensions } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
+// CORRECCIÓN CRÍTICA: Los imports deben ir siempre en la raíz superior externa
+// Subimos un nivel con '../' para salir de src/screens y encontrar config.js en la raíz del proyecto
+import { BASE_URL } from '../../config';
 
 const { width } = Dimensions.get('window');
 
@@ -10,9 +13,9 @@ export default function LoginScreen({ navigation }) {
   const [secureTextEntry, setSecureTextEntry] = useState(true);
   const [loading, setLoading] = useState(false);
 
-  // Mantén la IP que te funcione (Local o de tu Hotspot celular)
-  const API_URL = 'http://192.168.20.10:5000/api/login'; 
-
+  // Configuración de la URL de la API de PayBus
+  const API_URL = `${BASE_URL}/api/login`;
+  
   const handleRealLogin = async () => {
     if (!loginInput || !password) {
       Alert.alert('Campos vacíos', 'Por favor ingresa tus credenciales.');
@@ -32,14 +35,22 @@ export default function LoginScreen({ navigation }) {
 
       if (response.ok && data.success) {
         const userRol = data.user.rol;
-        if (userRol === 'pasajero') navigation.navigate('PassengerDashboard', { user: data.user });
-        else if (userRol === 'chofer') navigation.navigate('DriverDashboard', { user: data.user });
-        else if (userRol === 'admin') navigation.navigate('AdminDashboard', { user: data.user });
+        
+        // Verificación estricta de roles retornados por tu Backend en Python
+        if (userRol === 'pasajero') {
+          navigation.navigate('PassengerDashboard', { user: data.user });
+        } else if (userRol === 'chofer') {
+          navigation.navigate('DriverDashboard', { user: data.user });
+        } else if (userRol === 'admin') {
+          navigation.navigate('AdminDashboard', { user: data.user });
+        } else {
+          Alert.alert('Error de Rol', 'El rol asignado a este usuario no es válido.');
+        }
       } else {
         Alert.alert('Acceso Denegado', data.error || 'Credenciales incorrectas');
       }
     } catch (error) {
-      Alert.alert('Error de Red', 'No se pudo establecer comunicación con el servidor.');
+      Alert.alert('Error de Red', 'No se pudo establecer comunicación con el servidor ngrok.');
     } finally {
       setLoading(false);
     }
